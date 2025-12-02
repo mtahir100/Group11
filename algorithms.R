@@ -1,5 +1,7 @@
 # algorithms.R - Low-Rank Approximation Suite (SVD, NMF, CUR)
 
+set.seed(1) # For reproductibility
+
 # Helper function: Calculate RMSE
 calc_rmse <- function(X, X_recon) {
   sqrt(mean((X - X_recon)^2))
@@ -122,72 +124,57 @@ algo_nmf_randomized <- function(X, k) {
 # ==========================================
 # A approx C * U * R
 
-compute_leverage_scores <- function(X, k) {
-  # Compute leverage scores using SVD
-  s <- svd(X, nu = k, nv = k)
+pinv <- function(A, tol = 1e-10) {
+  s = svd(A)
+  d = s$d
   
-  # Column leverage scores (based on V)
-  lev_col <- rowSums(s$v[, 1:k]^2) / k
-  # Row leverage scores (based on U)
-  lev_row <- rowSums(s$u[, 1:k]^2) / k
+  # Invert non-zero singular values
+  d_inv <- ifelse(d > tol, 1 / d, 0)
   
-  list(col = lev_col, row = lev_row)
+  # Pseudoinverse formula
+  A_pinv <- s$v %*% diag(d_inv) %*% t(s$u)
+  return(A_pinv)
 }
 
-# Normal: Deterministic CUR (Select Top Leverage Scores)
-algo_cur_normal <- function(X, k) {
-  # Selection count is usually a multiple of k, set to k+5 here to ensure rank
-  c_num <- k + 5
-  r_num <- k + 5
-  c_num <- min(c_num, ncol(X)); r_num <- min(r_num, nrow(X))
+# CUR
+cur_decompose <- function(A, k) {
   
-  probs <- compute_leverage_scores(X, k)
+  # Frobenius norm squared
+  frob2 <- sum(A^2)
   
-  # Deterministically select the highest scores
-  col_idx <- order(probs$col, decreasing = TRUE)[1:c_num]
-  row_idx <- order(probs$row, decreasing = TRUE)[1:r_num]
+  # ---- Step 1: Column sampling probabilities ----
+  col_probs <- colSums(A^2) / frob2 # probability of each column
+  col_idx <- sample(1:ncol(A), k, replace = TRUE, prob = col_probs) # select k columns with higher proba of selecting higher proba columns
+  C <- A[, col_idx, drop = FALSE]
   
-  C <- X[, col_idx, drop = FALSE]
-  R <- X[row_idx, , drop = FALSE]
-  
-  # Compute middle matrix U = pinv(C) * X * pinv(R)
-  # Use manual pseudo-inverse to reduce dependencies
-  pinv <- function(M) {
-    s <- svd(M); tol <- 1e-5
-    d_inv <- 1 / s$d; d_inv[s$d < tol] <- 0
-    s$v %*% diag(d_inv, nrow=length(d_inv)) %*% t(s$u)
+  # Rescale selected columns
+  for (i in 1:k) {
+    C[, i] <- C[, i] / sqrt(k * col_probs[col_idx[i]])  #boost rare columns
   }
   
-  U_core <- pinv(C) %*% X %*% pinv(R)
+  # ---- Step 2: Row sampling probabilities ----
+  row_probs <- rowSums(A^2) / frob2
+  row_idx <- sample(1:nrow(A), k, replace = TRUE, prob = row_probs)
+  R <- A[row_idx, , drop = FALSE]
   
-  recon <- C %*% U_core %*% R
-  list(recon = recon, components = C, name = "Deterministic CUR (Top Leverage)")
-}
-
-# Randomized: Randomized CUR (Probability sampling based on leverage scores)
-algo_cur_randomized <- function(X, k) {
-  c_num <- k + 5
-  r_num <- k + 5
-  c_num <- min(c_num, ncol(X)); r_num <- min(r_num, nrow(X))
-  
-  probs <- compute_leverage_scores(X, k)
-  
-  # Probabilistic sampling
-  col_idx <- sample(1:ncol(X), c_num, prob = probs$col, replace = TRUE)
-  row_idx <- sample(1:nrow(X), r_num, prob = probs$row, replace = TRUE)
-  
-  C <- X[, col_idx, drop = FALSE]
-  R <- X[row_idx, , drop = FALSE]
-  
-  pinv <- function(M) {
-    s <- svd(M); tol <- 1e-5
-    d_inv <- 1 / s$d; d_inv[s$d < tol] <- 0
-    s$v %*% diag(d_inv, nrow=length(d_inv)) %*% t(s$u)
+  # Rescale selected rows
+  for (i in 1:k) {
+    R[i, ] <- R[i, ] / sqrt(k * row_probs[row_idx[i]])
   }
   
-  U_core <- pinv(C) %*% X %*% pinv(R)
-  recon <- C %*% U_core %*% R
+  # ---- Step 3: Compute U from intersection ----
+  W <- A[row_idx, col_idx, drop = FALSE]
   
-  list(recon = recon, components = C, name = "Randomized CUR (Weighted Sampling)")
+  # Compute pseudo-inverse of W
+  pinvW <- pinv(W)
+  
+  # Middle matrix U
+  U <- pinvW
+  
+  # ---- Step 4: CUR reconstruction ----
+  A_cur <- C %*% U %*% R
+  
+  list(C = C, U = U, R = R, CUR = A_cur,
+       col_idx = col_idx, row_idx = row_idx)
 }
 
